@@ -8,6 +8,11 @@ All notable changes to this project are documented in this file.
 
 - **Provider-aware classifier routing** - Select classifier models by the current session provider with `autoMode.classifierModelByProvider`, falling back to `classifierModel` or the session model. (#44)
 
+## Bug fixes
+
+- **OMP hashline edit paths** - Read OMP hashline `edit` targets from `[PATH#TAG]` headers and `MV` renames. `deniedPaths`, `allowInsideWorkingDirectory`, protected paths and deterministic hard-deny checks now apply to every target instead of sending each edit to the classifier.
+- **Configurable self-modification tier** - The classifier prompt no longer hardcodes auto-mode config changes as `hard_deny`; the configured rule lists decide, and inspecting config files is not tampering.
+
 ## [1.16.0] - 2026-09-07
 
 ## New features
