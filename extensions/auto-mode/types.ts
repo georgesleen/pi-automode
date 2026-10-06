@@ -148,6 +148,8 @@ export type ClassificationDecision = {
   decision: "allow" | "block";
   tier: "hard_deny" | "soft_deny" | "allow" | "explicit_intent" | "none";
   reason: string;
+  /** Set when the classifier could not be reached, so another attempt may help. */
+  unavailable?: boolean;
 };
 
 /** One classifier attempt: the raw model response (or error) and parsed decision. */

@@ -1249,3 +1249,153 @@ test("classifyWithRetry reports a thrown attempt via onAttempt and fails closed"
 	assert.match(attempts[0]?.error ?? "", /network down/);
 	assert.equal(attempts[0]?.response, undefined);
 });
+
+function routingCtx(options: {
+	configured?: any;
+	session: any;
+	unauthenticated?: string[];
+	respond: (model: any) => AssistantMessage | Error;
+	calls: string[];
+}) {
+	const provider = {
+		streamSimple(callModel: any) {
+			options.calls.push(`${callModel.provider}/${callModel.id}`);
+			const response = options.respond(callModel);
+			return {
+				result: async () => {
+					if (response instanceof Error) throw response;
+					return response;
+				},
+			};
+		},
+	};
+	return createFakeCtx([], {
+		model: options.session,
+		signal: new AbortController().signal,
+		modelRegistry: {
+			find: (providerName: string, id: string) =>
+				options.configured?.provider === providerName &&
+					options.configured?.id === id
+					? options.configured
+					: undefined,
+			getProvider: () => provider,
+			async complete(callModel: any) {
+				return provider.streamSimple(callModel).result();
+			},
+			getApiKeyAndHeaders: async (model: any) =>
+				options.unauthenticated?.includes(model.id)
+					? { ok: false, error: "missing credentials" }
+					: { ok: true, apiKey: "key" },
+		},
+	});
+}
+
+const routingModel = (provider: string, id: string) => ({
+	provider,
+	id,
+	api: "runtime-only-api",
+	baseUrl: "https://original.invalid",
+	reasoning: false,
+	contextWindow: 128_000,
+	maxTokens: 32_000,
+});
+
+test("defaultClassifyAction falls back to the session model when the configured one is missing", async () => {
+	const session = routingModel("anthropic", "session");
+	const calls: string[] = [];
+	const ctx = routingCtx({ session, respond: () => assistantWith("0"), calls });
+	const result = await defaultClassifyAction(
+		ctx as never,
+		baseConfig({ classifierModel: "claude-bridge/absent" }),
+		'{"toolName":"bash","input":{"command":"echo ok"}}',
+		"",
+	);
+	assert.equal(result.decision, "allow");
+	assert.deepEqual(calls, ["anthropic/session"]);
+});
+
+test("defaultClassifyAction falls back to the session model when the configured one is unauthenticated", async () => {
+	const configured = routingModel("claude-bridge", "haiku");
+	const session = routingModel("anthropic", "session");
+	const calls: string[] = [];
+	const ctx = routingCtx({
+		configured,
+		session,
+		unauthenticated: ["haiku"],
+		respond: () => assistantWith("0"),
+		calls,
+	});
+	const result = await defaultClassifyAction(
+		ctx as never,
+		baseConfig({ classifierModel: "claude-bridge/haiku" }),
+		'{"toolName":"bash","input":{"command":"echo ok"}}',
+		"",
+	);
+	assert.equal(result.decision, "allow");
+	assert.deepEqual(calls, ["anthropic/session"]);
+});
+
+test("defaultClassifyAction retries a provider error, then tries the session model", async () => {
+	const configured = routingModel("claude-bridge", "haiku");
+	const session = routingModel("anthropic", "session");
+	const calls: string[] = [];
+	const ctx = routingCtx({
+		configured,
+		session,
+		respond: (model) =>
+			model.id === "haiku" ? new Error("429 rate_limit_error") : assistantWith("0"),
+		calls,
+	});
+	const result = await defaultClassifyAction(
+		ctx as never,
+		baseConfig({ classifierModel: "claude-bridge/haiku" }),
+		'{"toolName":"bash","input":{"command":"echo ok"}}',
+		"",
+	);
+	assert.equal(result.decision, "allow");
+	assert.deepEqual(calls, [
+		"claude-bridge/haiku",
+		"claude-bridge/haiku",
+		"anthropic/session",
+	]);
+});
+
+test("defaultClassifyAction never retries a policy block", async () => {
+	const configured = routingModel("claude-bridge", "haiku");
+	const session = routingModel("anthropic", "session");
+	const calls: string[] = [];
+	const ctx = routingCtx({
+		configured,
+		session,
+		respond: (_model) => assistantWith("1"),
+		calls,
+	});
+	await defaultClassifyAction(
+		ctx as never,
+		baseConfig({ classifierModel: "claude-bridge/haiku" }),
+		'{"toolName":"bash","input":{"command":"rm -rf ~"}}',
+		"",
+	);
+	assert.ok(calls.every((call) => call === "claude-bridge/haiku"), calls.join());
+});
+
+test("defaultClassifyAction still fails closed when every classifier is unreachable", async () => {
+	const configured = routingModel("claude-bridge", "haiku");
+	const session = routingModel("anthropic", "session");
+	const calls: string[] = [];
+	const ctx = routingCtx({
+		configured,
+		session,
+		respond: () => new Error("429 rate_limit_error"),
+		calls,
+	});
+	const result = await defaultClassifyAction(
+		ctx as never,
+		baseConfig({ classifierModel: "claude-bridge/haiku" }),
+		'{"toolName":"bash","input":{"command":"echo ok"}}',
+		"",
+	);
+	assert.equal(result.decision, "block");
+	assert.match(result.reason, /fails closed/);
+	assert.equal(calls.length, 3);
+});

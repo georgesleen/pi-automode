@@ -50,15 +50,22 @@ export function buildClassifierPrompt(config: EffectiveConfig): string {
     );
 }
 
+type ResolvedClassifier = {
+  model: Model<any>;
+  apiKey?: string;
+  headers?: ProviderHeaders;
+  env?: Record<string, string>;
+};
+
+type ClassifierCandidate = {
+  classifier: ResolvedClassifier;
+  completionPlan: ClassifierCompletionPlan;
+};
+
 type ClassifierResolution = {
   reasoning: ClassifierReasoningLog;
-  classifier?: {
-    model: Model<any>;
-    apiKey?: string;
-    headers?: ProviderHeaders;
-    env?: Record<string, string>;
-  };
-  completionPlan?: ClassifierCompletionPlan;
+  /** The configured classifier, then the session model, each only if usable. */
+  candidates: ClassifierCandidate[];
 };
 
 export function classifierReasoningForConfig(
@@ -69,25 +76,11 @@ export function classifierReasoningForConfig(
     : { mode: "explicit", requestedLevel };
 }
 
-async function resolveClassifier(
+async function resolveCandidate(
   ctx: ExtensionContext,
   config: EffectiveConfig,
-): Promise<ClassifierResolution> {
-  const configured = classifierModelForProvider(config, ctx.model?.provider);
-  const model = configured
-    ? (() => {
-      const parsed = parseModelSpec(configured);
-      return parsed
-        ? ctx.modelRegistry.find(parsed.provider, parsed.id)
-        : undefined;
-    })()
-    : ctx.model;
-  if (!model) {
-    return {
-      reasoning: classifierReasoningForConfig(config.classifierReasoningLevel),
-    };
-  }
-
+  model: Model<any>,
+): Promise<{ reasoning: ClassifierReasoningLog; candidate?: ClassifierCandidate }> {
   const { rawComplete, simpleComplete } = createRegistryCompletionFns(
     ctx.modelRegistry,
   );
@@ -101,13 +94,54 @@ async function resolveClassifier(
   if (!auth.ok) return { reasoning: completionPlan.reasoning };
   return {
     reasoning: completionPlan.reasoning,
-    classifier: {
-      model: auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
-      apiKey: auth.apiKey,
-      headers: auth.headers,
-      env: auth.env,
+    candidate: {
+      classifier: {
+        model: auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
+        apiKey: auth.apiKey,
+        headers: auth.headers,
+        env: auth.env,
+      },
+      completionPlan,
     },
-    completionPlan,
+  };
+}
+
+/**
+ * Resolve the configured classifier and, as a fallback, the session's own
+ * model, so a configured model that is missing or unauthenticated in this
+ * context still gets a classifier rather than failing closed.
+ */
+async function resolveClassifier(
+  ctx: ExtensionContext,
+  config: EffectiveConfig,
+): Promise<ClassifierResolution> {
+  const configured = classifierModelForProvider(config, ctx.model?.provider);
+  const parsed = configured ? parseModelSpec(configured) : undefined;
+  const models: Model<any>[] = [];
+  const configuredModel = parsed
+    ? ctx.modelRegistry.find(parsed.provider, parsed.id)
+    : undefined;
+  if (configuredModel) models.push(configuredModel);
+  if (
+    ctx.model &&
+    !models.some((model) =>
+      model.provider === ctx.model?.provider && model.id === ctx.model?.id
+    )
+  ) {
+    models.push(ctx.model);
+  }
+
+  const candidates: ClassifierCandidate[] = [];
+  let reasoning: ClassifierReasoningLog | undefined;
+  for (const model of models) {
+    const resolved = await resolveCandidate(ctx, config, model);
+    reasoning ??= resolved.reasoning;
+    if (resolved.candidate) candidates.push(resolved.candidate);
+  }
+  return {
+    reasoning: candidates[0]?.completionPlan.reasoning ?? reasoning ??
+      classifierReasoningForConfig(config.classifierReasoningLevel),
+    candidates,
   };
 }
 
@@ -556,6 +590,7 @@ function classifierFailure(
     reason: `${label} failed; auto mode fails closed: ${
       response.errorMessage || fallback
     }`,
+    ...(response.stopReason === "error" ? { unavailable: true } : {}),
   };
 }
 
@@ -617,6 +652,7 @@ export async function classifyWithRetry(
         decision: "block",
         tier: "none",
         reason: `Classifier failed; auto mode fails closed: ${message}`,
+        unavailable: true,
       };
     }
     const durationMs = Date.now() - started;
@@ -699,6 +735,7 @@ export async function classifyInStages(
       decision: "block",
       tier: "none",
       reason: `Fast classifier failed; auto mode fails closed: ${message}`,
+      unavailable: true,
     };
   }
 
@@ -761,6 +798,14 @@ export function classifierCacheSessionId(ctx: ExtensionContext): string {
   return `pi-automode-${digest}`;
 }
 
+/**
+ * A further classifier attempt starts only while the failed attempts so far
+ * have taken less than this. Fast failures (rate limits, refused connections,
+ * missing auth) are retried; a slow failure such as a timeout is not, so the
+ * extra attempt cannot push the hook past the host's tool-call watchdog.
+ */
+export const CLASSIFIER_RETRY_WINDOW_MS = 15_000;
+
 export const defaultClassifyAction: ClassifyAction = async (
   ctx,
   config,
@@ -768,7 +813,7 @@ export const defaultClassifyAction: ClassifyAction = async (
   loadedContext,
 ): Promise<ClassifyResult> => {
   const resolution = await resolveClassifier(ctx, config);
-  if (!resolution.classifier || !resolution.completionPlan) {
+  if (resolution.candidates.length === 0) {
     return {
       decision: "block",
       tier: "none",
@@ -776,8 +821,6 @@ export const defaultClassifyAction: ClassifyAction = async (
       reasoning: resolution.reasoning,
     };
   }
-  const classifier = resolution.classifier;
-  const completionPlan = resolution.completionPlan;
 
   const systemPrompt = buildClassifierPrompt(config);
   const transcript = buildClassifierTranscript(ctx, {
@@ -794,8 +837,7 @@ export const defaultClassifyAction: ClassifyAction = async (
     content: [{ type: "text", text: contextText }],
     timestamp: Date.now(),
   };
-  const attempts: ClassifierIoAttempt[] = [];
-  const started = Date.now();
+  const actionMessage = buildClassifierActionMessage(action);
   const ioPrompt = {
     system: systemPrompt,
     context: contextText,
@@ -803,54 +845,63 @@ export const defaultClassifyAction: ClassifyAction = async (
     fastInstruction: CLASSIFIER_FAST_INSTRUCTION,
     detailedInstruction: CLASSIFIER_DETAILED_INSTRUCTION,
   };
-  const actionLimitReason = classifierActionLimitReason(
-    classifier.model.contextWindow,
-    classifier.model.maxTokens,
-    completionPlan.reasoningLevel,
-    config.fastClassifierMaxTokens,
-    systemPrompt,
-    contextText,
-    action,
-  );
-  if (actionLimitReason) {
-    return {
-      decision: "block",
-      tier: "none",
-      reason: actionLimitReason,
-      reasoning: completionPlan.reasoning,
-      io: {
-        model: formatModelSpec(classifier.model),
-        reasoning: completionPlan.reasoning,
-        prompt: ioPrompt,
-        attempts,
-        durationMs: Date.now() - started,
-      },
-    };
-  }
-  const actionMessage = buildClassifierActionMessage(action);
-  const decision = await classifyInStages(
-    completionPlan.completeFn,
-    classifier,
-    { systemPrompt, contextMessage, actionMessage },
-    ctx.signal,
-    {
-      sessionId: classifierCacheSessionId(ctx),
-      fastClassifierMaxTokens: config.fastClassifierMaxTokens,
-      timeoutMs: config.classifierTimeoutMs,
-      reasoningLevel: completionPlan.reasoningLevel,
-      onAttempt: (attempt) => attempts.push(attempt),
-    },
-  );
+  const started = Date.now();
 
-  return {
-    ...decision,
-    reasoning: completionPlan.reasoning,
-    io: {
+  const classifyWith = async (
+    { classifier, completionPlan }: ClassifierCandidate,
+  ): Promise<ClassifyResult> => {
+    const attempts: ClassifierIoAttempt[] = [];
+    const attemptStarted = Date.now();
+    const io = () => ({
       model: formatModelSpec(classifier.model),
       reasoning: completionPlan.reasoning,
       prompt: ioPrompt,
       attempts,
-      durationMs: Date.now() - started,
-    },
+      durationMs: Date.now() - attemptStarted,
+    });
+    const actionLimitReason = classifierActionLimitReason(
+      classifier.model.contextWindow,
+      classifier.model.maxTokens,
+      completionPlan.reasoningLevel,
+      config.fastClassifierMaxTokens,
+      systemPrompt,
+      contextText,
+      action,
+    );
+    if (actionLimitReason) {
+      return {
+        decision: "block",
+        tier: "none",
+        reason: actionLimitReason,
+        reasoning: completionPlan.reasoning,
+        io: io(),
+      };
+    }
+    const decision = await classifyInStages(
+      completionPlan.completeFn,
+      classifier,
+      { systemPrompt, contextMessage, actionMessage },
+      ctx.signal,
+      {
+        sessionId: classifierCacheSessionId(ctx),
+        fastClassifierMaxTokens: config.fastClassifierMaxTokens,
+        timeoutMs: config.classifierTimeoutMs,
+        reasoningLevel: completionPlan.reasoningLevel,
+        onAttempt: (attempt) => attempts.push(attempt),
+      },
+    );
+    return { ...decision, reasoning: completionPlan.reasoning, io: io() };
   };
+
+  // The configured classifier twice, then the session model once.
+  const [primary, ...fallbacks] = resolution.candidates;
+  const plan = [primary, primary, ...fallbacks];
+  let result = await classifyWith(plan[0]);
+  for (const candidate of plan.slice(1)) {
+    if (!result.unavailable) break;
+    if (Date.now() - started >= CLASSIFIER_RETRY_WINDOW_MS) break;
+    if (ctx.signal?.aborted) break;
+    result = await classifyWith(candidate);
+  }
+  return result;
 };
