@@ -496,16 +496,17 @@ test("tempRootCandidates recomputes when the effective tmpdir changes", () => {
 });
 
 test("AST hard-deny applies temp policy to find -delete roots", () => {
+	const temporary = os.tmpdir();
 	assert.equal(
 		deterministicHardDeny(
 			"bash",
-			{ command: "find /tmp/automode-find-subtree -delete" },
+			{ command: `find '${join(temporary, "automode-find-subtree")}' -delete` },
 			process.cwd(),
 		),
 		undefined,
 	);
 	assert.match(
-		deterministicHardDeny("bash", { command: "find /tmp -delete" }, process.cwd()) ?? "",
+		deterministicHardDeny("bash", { command: `find '${temporary}' -delete` }, process.cwd()) ?? "",
 		/system-wide delete/,
 	);
 });

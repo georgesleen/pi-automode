@@ -154,6 +154,8 @@ npm test
 npm pack --dry-run
 ```
 
+`npm test` runs with a temporary home and configuration directory so local settings and Home Manager symlinks cannot affect policy fixtures.
+
 The tests cover these safety-sensitive areas:
 
 - scoped permission matching
