@@ -68,11 +68,9 @@ test("automode_inspect still obeys explicit permission denies", async () => {
 		"tool_call",
 		{ toolName: "automode_inspect", input: { action: "status" } },
 		hook.ctx,
-	);
-	assert.deepEqual(result, {
-		block: true,
-		reason: "[pi-automode] Blocked by permissions.deny: automode_inspect",
-	});
+	) as { block?: boolean; reason?: string };
+	assert.equal(result.block, true);
+	assert.match(result.reason ?? "", /Blocked by permissions\.deny: automode_inspect/);
 	assert.equal(hook.classifierCalls, 0);
 	assert.equal(hook.entries.at(-1)?.data.checkedActions, 1);
 	assert.equal(hook.entries.at(-1)?.data.blockedActions, 1);

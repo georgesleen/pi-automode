@@ -56,48 +56,48 @@ test("statusText reports the configured classifier reasoning level", () => {
 test("statusLine: enabled with no classifier calls omits the ca/cd segment", () => {
 	const config = baseConfig();
 	const state = baseState({ checkedActions: 6, blockedActions: 1 });
-	assert.equal(statusLine(config, state), "AM● a:5 d:1");
+	assert.equal(statusLine(config, state), "AM ● a:5 d:1");
 });
 
 test("statusLine: enabled with classifier calls appends ca/cd segment", () => {
 	const config = baseConfig();
 	const state = baseState({ checkedActions: 6, blockedActions: 1, classifierAllowed: 2, classifierDenied: 1 });
-	assert.equal(statusLine(config, state), "AM● a:5 d:1 ca:2 cd:1");
+	assert.equal(statusLine(config, state), "AM ● a:5 d:1 ca:2 cd:1");
 });
 
 test("statusLine: disabled shows empty circle with frozen counts", () => {
 	const config = baseConfig({ enabled: false });
 	const state = baseState({ checkedActions: 18, blockedActions: 3, classifierAllowed: 7, classifierDenied: 5 });
-	assert.equal(statusLine(config, state), "AM○ a:15 d:3 ca:7 cd:5");
+	assert.equal(statusLine(config, state), "AM ○ a:15 d:3 ca:7 cd:5");
 });
 
 test("statusLine: enabledOverride:false overrides an enabled config", () => {
 	const config = baseConfig({ enabled: true });
 	const state = baseState({ enabledOverride: false, checkedActions: 4, blockedActions: 1 });
-	assert.equal(statusLine(config, state), "AM○ a:3 d:1");
+	assert.equal(statusLine(config, state), "AM ○ a:3 d:1");
 });
 
 test("statusLine: allowed is derived from checked minus blocked", () => {
 	const config = baseConfig();
 	const state = baseState({ checkedActions: 10, blockedActions: 3, classifierAllowed: 1, classifierDenied: 1 });
-	assert.equal(statusLine(config, state), "AM● a:7 d:3 ca:1 cd:1");
+	assert.equal(statusLine(config, state), "AM ● a:7 d:3 ca:1 cd:1");
 });
 
 test("statusLine: zero counts render a:0 d:0 with no ca/cd segment", () => {
 	const config = baseConfig();
-	assert.equal(statusLine(config, baseState()), "AM● a:0 d:0");
+	assert.equal(statusLine(config, baseState()), "AM ● a:0 d:0");
 });
 
 test("statusLine: classifier segment shows when only allows have happened", () => {
 	const config = baseConfig();
 	const state = baseState({ checkedActions: 4, blockedActions: 0, classifierAllowed: 3, classifierDenied: 0 });
-	assert.equal(statusLine(config, state), "AM● a:4 d:0 ca:3 cd:0");
+	assert.equal(statusLine(config, state), "AM ● a:4 d:0 ca:3 cd:0");
 });
 
 test("statusLine: classifier segment shows when only denials have happened", () => {
 	const config = baseConfig();
 	const state = baseState({ checkedActions: 2, blockedActions: 2, classifierAllowed: 0, classifierDenied: 2 });
-	assert.equal(statusLine(config, state), "AM● a:0 d:2 ca:0 cd:2");
+	assert.equal(statusLine(config, state), "AM ● a:0 d:2 ca:0 cd:2");
 });
 
 // --- observability logging -------------------------------------------------

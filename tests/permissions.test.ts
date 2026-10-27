@@ -32,7 +32,7 @@ test("permission patterns keep argument scope instead of flattening to a tool al
 });
 
 test("malformed permission deny patterns fail closed without broadening allow rules", () => {
-	for (const source of ["bash()", "bash(", 'bash(git push "unterminated)']) {
+	for (const source of ["$defaults", "bash()", "bash(", 'bash(git push "unterminated)']) {
 		const pattern = parseToolPattern(source);
 		assert.ok(pattern);
 		assert.equal(

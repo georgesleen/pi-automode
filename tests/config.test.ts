@@ -761,6 +761,17 @@ test("validateSettingsFile accepts permissions.allow and validates its entries",
 	);
 });
 
+test("validateSettingsFile diagnoses malformed permissions.deny patterns", () => {
+	const malformed = ["$defaults", "bash()", "bash(", 'bash(git push "unterminated)'];
+
+	assert.deepEqual(
+		validateSettingsFile({ permissions: { deny: malformed } }, "test-config"),
+		malformed.map((_, index) =>
+			`test-config: permissions.deny[${index}] must be a tool pattern string`
+		),
+	);
+});
+
 test("project-local classifier model overrides global classifier model", () => {
 	const config = buildEffectiveConfigFromSources({
 		globalSettings: [{ autoMode: { classifierModel: "global/model" } }],
@@ -832,6 +843,78 @@ test("classifier models by provider validate object keys and model specs", () =>
 	);
 });
 
+test("invalid classifier models produce diagnostics and preserve valid precedence", () => {
+  for (const classifierModel of [42, "invalid", "/model", "provider/"]) {
+    const diagnostics = validateSettingsFile({
+      autoMode: { classifierModel },
+    } as any, "test-config");
+    assert.deepEqual(diagnostics, [
+      "test-config: autoMode.classifierModel must be a provider/model string",
+    ]);
+
+    const config = buildEffectiveConfigFromSources({
+      globalSettings: [{ autoMode: { classifierModel: "global/model" } }],
+      projectLocalSettings: [{ autoMode: { classifierModel } as any }],
+    });
+    assert.equal(config.classifierModel, "global/model");
+  }
+});
+
+test("invalid classifier models do not enter config without a valid fallback", () => {
+  for (const classifierModel of [42, "invalid", "/model", "provider/"]) {
+    const config = buildEffectiveConfigFromSources({
+      inlineSettings: [{ autoMode: { classifierModel } as any }],
+    });
+    assert.equal(config.classifierModel, undefined);
+  }
+});
+
+test("invalid loaded classifier model cannot make a classified tool call throw", async () => {
+  const previousInlineSettings = process.env.PI_AUTOMODE_SETTINGS_JSON;
+  const dir = mkdtempSync(join(os.tmpdir(), "pi-automode-invalid-model-"));
+  const fake = createFakePi();
+  try {
+    process.env.PI_AUTOMODE_SETTINGS_JSON = JSON.stringify({
+      autoMode: { classifierModel: 42 },
+    });
+    const loaded = loadEffectiveConfigWithDiagnostics(
+      dir,
+      false,
+      join(dir, "missing-global-config.json"),
+    );
+    assert.equal(loaded.config.classifierModel, undefined);
+
+    createPiAutomode({ loadConfig: () => loaded.config })(fake.pi);
+    const ctx = createFakeCtx(fake.entries, {
+      cwd: dir,
+      model: undefined,
+      modelRegistry: {
+        find() {
+          throw new Error("invalid classifier model reached model resolution");
+        },
+        async getApiKeyAndHeaders() {
+          throw new Error("classifier setup should be unavailable");
+        },
+      },
+    });
+
+    const result = await fake.emit("tool_call", {
+      type: "tool_call",
+      toolName: "write",
+      input: { path: join(dir, "file.txt"), content: "test" },
+    }, ctx) as { block?: boolean; reason?: string };
+
+    assert.equal(result.block, true);
+    assert.match(result.reason ?? "", /No classifier model\/API key available/);
+  } finally {
+    if (previousInlineSettings === undefined) {
+      delete process.env.PI_AUTOMODE_SETTINGS_JSON;
+    } else {
+      process.env.PI_AUTOMODE_SETTINGS_JSON = previousInlineSettings;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 test("classifier reasoning level defaults to server choice and follows configurable precedence", () => {
 	assert.equal(buildEffectiveConfigFromSources({}).classifierReasoningLevel, undefined);
 

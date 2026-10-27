@@ -12,6 +12,28 @@ All notable changes to this project are documented in this file.
 
 - **OMP hashline edit paths** - Read OMP hashline `edit` targets from `[PATH#TAG]` headers and `MV` renames. `deniedPaths`, `allowInsideWorkingDirectory`, protected paths and deterministic hard-deny checks now apply to every target instead of sending each edit to the classifier.
 - **Configurable self-modification tier** - The classifier prompt no longer hardcodes auto-mode config changes as `hard_deny`; the configured rule lists decide, and inspecting config files is not tampering.
+- **Classifier availability fallback** - Retry quick provider failures, then classify with the session model. Policy blocks, invalid decisions and exhausted availability attempts still fail closed.
+- **System-wide delete checks** — Block recursive deletion of `/Users` and its subdirectories. Check the search root after `find -H`, `-L`, or `-P` before `-delete`.
+- **Codex classifier shutdown** — Codex classifier requests no longer keep session WebSockets. This lets `pi -p` exit after classification. These requests no longer reuse the prompt cache. (#60)
+
+## [1.17.0] - 2026-09-22
+
+## New features
+
+- **Schema-constrained classifier decisions** — Return detailed-stage decisions through an internal `classifier_decision` tool call. Supported providers enforce the schema during generation, and pi-automode validates every returned call locally. When strict tool sampling is available, this reduces fail-closed blocks caused by malformed or contract-invalid decision JSON. (#50)
+- **[Permission recipes](docs/permission-recipes.md)** — Add safe, composable examples for Bash permissions, working-directory changes, command chains, redirects, and classifier guidance. Thanks to @georgesleen for the impulse! (#46)
+
+## Bug fixes
+
+- **Status indicator separator** — Add one space between the `AM` prefix and the status symbol.
+- **Classifier context budgeting** — Estimate fast and detailed classifier requests in tokens instead of mixing UTF-8 bytes with token limits. Check detailed-stage capacity only after the fast stage requests review. Large project contexts no longer block small actions that fit. (#37)
+- **Explicit blocked-action feedback** — State that blocked tools did not run. Tell the agent not to claim success or rely on blocked effects. Require a report before dependent work continues. (#38)
+- **Shared classifier reasoning reserves** — Use OMP 18 Anthropic reasoning budgets for classifier context checks under Pi and OMP. Reserve 4,096 tokens at `low` and 32,768 tokens at `xhigh` and `max` for all classifier providers. (#51)
+- **Pi 0.86 classifier compatibility** — Route explicit-reasoning classifier calls through the model registry's normalized streaming API. Keep direct-provider support for older Pi versions and the compat fallback for OMP 18. (#52)
+- **Dynamic Bash allow coverage** — Route commands with unresolved Bash argument expansions or active pathname expansions to classifier review. Preserve static quoted, escaped, and ANSI-C glob literals. (#54)
+- **Classifier model validation** — Reject non-string and malformed `classifierModel` values during diagnostics and configuration merging. Preserve valid lower-precedence values and the session-model fallback. Prevent invalid configuration from causing tool-hook exceptions. (#55)
+- **Malformed permission deny diagnostics** — Report malformed `permissions.deny` patterns with their configuration source and list index. Preserve fail-closed deny matching and no-match allow behavior. (#56)
+- **Cancelled tool-call accounting** — Route already-cancelled calls through the standard block path. Record counters, denial history, persisted state, UI updates, and decision logs without Bash analysis or classifier work. (#57)
 
 ## [1.16.0] - 2026-09-07
 
@@ -71,7 +93,8 @@ All notable changes to this project are documented in this file.
 - **Project config trust gate** — Ignore `.pi/automode.local.json` and `.pi/automode.json` until Pi trusts the project. Apply the trust gate during startup and config reloads. (#16)
 - **In-memory observability logs** — Write logs to an extension-owned directory (`~/.pi/agent/extensions/pi-automode/logs/`) instead of the launching project directory. Thanks, @HerbertGao! (#13)
 
-[Unreleased]: https://github.com/czottmann/pi-automode/compare/v1.16.0...HEAD
+[Unreleased]: https://github.com/czottmann/pi-automode/compare/v1.17.0...HEAD
+[1.17.0]: https://github.com/czottmann/pi-automode/compare/v1.16.0...v1.17.0
 [1.16.0]: https://github.com/czottmann/pi-automode/compare/v1.15.0...v1.16.0
 [1.15.0]: https://github.com/czottmann/pi-automode/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/czottmann/pi-automode/compare/v1.13.0...v1.14.0

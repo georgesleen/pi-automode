@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -152,7 +152,7 @@ test("tool_call routes read-only tools through classifier when classifyReadOnlyT
 	assert.equal(harness.classifierCalls, 1);
 });
 
-test("tool_call blocks read-only tools via classifier when classifyReadOnlyTools is true and classifier denies", async () => {
+test("tool_call makes blocked actions operationally explicit", async () => {
 	const harness = await setupHookTest({
 		config: baseConfig({ classifyReadOnlyTools: true }),
 		classifier: async () => ({ decision: "block", tier: "hard_deny", reason: "mock block" }),
@@ -165,7 +165,102 @@ test("tool_call blocks read-only tools via classifier when classifyReadOnlyTools
 
 	assert.equal(result.block, true);
 	assert.match(result.reason ?? "", /mock block/);
+	assert.match(result.reason ?? "", /tool did not run/i);
+	assert.match(result.reason ?? "", /do not claim success/i);
+	assert.match(result.reason ?? "", /rely on effects from this call/i);
+	assert.match(result.reason ?? "", /equivalent workaround/i);
+	assert.match(result.reason ?? "", /report the block.*before continuing with dependent work/i);
+	assert.match(result.reason ?? "", /independent work can continue/i);
 	assert.equal(harness.classifierCalls, 1);
+});
+
+test("tool_call records cancelled actions without Bash analysis or classification", async () => {
+	const dir = mkdtempSync(join(os.tmpdir(), "pi-automode-cancelled-hook-"));
+	try {
+		const sessionFile = join(dir, "session.jsonl");
+		const ctx = createFakeCtx([], { signal: AbortSignal.abort(), sessionFile });
+		let bashAnalysisCalls = 0;
+		const harness = await setupHookTest({
+			config: baseConfig({ log: { enabled: true, classifierIo: false } }),
+			ctx,
+			analyze: (...args) => {
+				bashAnalysisCalls += 1;
+				return analyzeBash(...args);
+			},
+		});
+
+		const result = await harness.emit("tool_call", {
+			toolName: "bash",
+			input: { command: "echo safe" },
+		}, harness.ctx) as { block?: boolean; reason?: string };
+
+		assert.equal(result.block, true);
+		assert.match(result.reason ?? "", /cancelled/i);
+		assert.match(result.reason ?? "", /tool did not run/i);
+		assert.match(result.reason ?? "", /do not claim success/i);
+		assert.match(result.reason ?? "", /rely on effects from this call/i);
+		assert.match(result.reason ?? "", /equivalent workaround/i);
+		assert.match(result.reason ?? "", /report the block.*before continuing with dependent work/i);
+		assert.match(result.reason ?? "", /independent work can continue/i);
+		assert.equal(bashAnalysisCalls, 0);
+		assert.equal(harness.classifierCalls, 0);
+
+		const state = harness.entries.at(-1)?.data;
+		assert.equal(harness.entries.at(-1)?.customType, "pi-automode-state");
+		assert.equal(state.checkedActions, 1);
+		assert.equal(state.blockedActions, 1);
+		assert.equal(state.lastDecision, "block");
+		assert.equal(state.lastReason, "Cancelled");
+		assert.equal(state.recentDenials.length, 1);
+		assert.equal(state.recentDenials[0].kind, "setup");
+		assert.equal(state.recentDenials[0].toolName, "bash");
+		assert.equal(state.recentDenials[0].reason, "Cancelled");
+		assert.match(state.recentDenials[0].action, /echo safe/);
+
+		assert.match(ctx.statuses.at(-1)?.text ?? "", /d:1/);
+		assert.deepEqual(ctx.notifications.at(-1), {
+			message: "Auto mode blocked bash: Cancelled",
+			type: "warning",
+		});
+
+		const logEntries = readFileSync(
+			join(dir, "session-pi-automode.jsonl"),
+			"utf8",
+		).trim().split("\n").map((line) => JSON.parse(line));
+		assert.equal(logEntries.length, 1);
+		assert.equal(logEntries[0].type, "decision");
+		assert.equal(logEntries[0].kind, "setup");
+		assert.equal(logEntries[0].outcome, "block");
+		assert.equal(logEntries[0].reason, "Cancelled");
+		assert.equal(logEntries[0].summary, state.recentDenials[0].action);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("before_agent_start adds blocked-action guidance when auto mode is enabled", async () => {
+	const harness = await setupHookTest();
+	const result = await harness.emit("before_agent_start", {
+		systemPrompt: "base prompt",
+		systemPromptOptions: { contextFiles: [] },
+	}, harness.ctx) as { systemPrompt?: string };
+
+	assert.match(result.systemPrompt ?? "", /pi-automode blocks a tool call/i);
+	assert.match(result.systemPrompt ?? "", /treat the action as not executed/i);
+	assert.match(result.systemPrompt ?? "", /do not claim success/i);
+	assert.match(result.systemPrompt ?? "", /equivalent workaround/i);
+	assert.match(result.systemPrompt ?? "", /report the block.*before continuing with dependent work/i);
+	assert.match(result.systemPrompt ?? "", /independent work can continue/i);
+});
+
+test("before_agent_start omits blocked-action guidance when auto mode is disabled", async () => {
+	const harness = await setupHookTest({ config: baseConfig({ enabled: false }) });
+	const result = await harness.emit("before_agent_start", {
+		systemPrompt: "base prompt",
+		systemPromptOptions: { contextFiles: [] },
+	}, harness.ctx);
+
+	assert.equal(result, undefined);
 });
 
 test("tool patterns for MCP and extension tools match by bare tool name only", () => {
@@ -439,7 +534,6 @@ test("composite Bash allow patterns reject different group and wrapper structure
 test("composite Bash allow patterns preserve nested, group, and wrapper structure", async () => {
 	for (const [rawPattern, command] of [
 		["bash({ git status*; echo *; })", "{ git status --short; echo done; }"],
-		["bash(echo $(git status*))", "echo $(git status --short)"],
 		["bash(bash -c 'git status* && echo *')", "bash -c 'git status --short && echo done'"],
 		["bash(sh -c 'git status*')", "sh -c 'git status --short'"],
 		["bash(eval 'git status*')", "eval 'git status --short'"],
@@ -659,21 +753,18 @@ test("plain Bash allow patterns reject independently covered nested execution", 
 		{
 			command: 'echo "$(git status --short)"',
 			plainPatterns: ["bash(echo *)", "bash(git status*)"],
-			compositePattern: 'bash(echo "$(git status*)")',
 		},
 		{
 			command: "cat < <(git status --short)",
 			plainPatterns: ["bash(cat)", "bash(git status*)"],
-			compositePattern: undefined,
 		},
 		{
 			command: 'echo "$(( $(git status --short) + 1 ))"',
 			plainPatterns: ["bash(echo *)", "bash(git status*)"],
-			compositePattern: 'bash(echo "$(( $(git status*) + 1 ))")',
 		},
 	] as const;
 
-	for (const { command, plainPatterns, compositePattern } of cases) {
+	for (const { command, plainPatterns } of cases) {
 		const plain = plainPatterns.map((raw) => parseToolPattern(raw));
 		assert.equal(plain.every((pattern) => !!pattern), true);
 		const plainHarness = await setupHookTest({
@@ -692,20 +783,6 @@ test("plain Bash allow patterns reject independently covered nested execution", 
 		assert.equal(rejected.block, true, command);
 		assert.match(rejected.reason ?? "", /nested Bash execution requires review/, command);
 		assert.equal(plainHarness.classifierCalls, 1, command);
-
-		if (compositePattern) {
-			const composite = parseToolPattern(compositePattern);
-			assert.ok(composite);
-			const compositeHarness = await setupHookTest({
-				config: baseConfig({ permissionAllow: [composite] }),
-			});
-			const allowed = await compositeHarness.emit("tool_call", {
-				toolName: "bash",
-				input: { command },
-			}, compositeHarness.ctx);
-			assert.equal(allowed, undefined, command);
-			assert.equal(compositeHarness.classifierCalls, 0, command);
-		}
 	}
 });
 
@@ -737,6 +814,77 @@ test("Bash permission allow rejects dynamic executable structure", async () => {
 		assert.match(result.reason ?? "", /dynamic Bash structure/, command);
 	}
 	assert.equal(harness.classifierCalls, 6);
+});
+
+test("Bash permission allow routes dynamic arguments to the classifier", async () => {
+	const allow = parseToolPattern("bash(rm -rf *)");
+	assert.ok(allow);
+	const harness = await setupHookTest({
+		config: baseConfig({ permissionAllow: [allow] }),
+		classifier: async () => ({
+			decision: "block",
+			tier: "none",
+			reason: "dynamic Bash arguments require review",
+		}),
+	});
+
+	const result = await harness.emit("tool_call", {
+		toolName: "bash",
+		input: { command: 'rm -rf "$PWD/../../etc"' },
+	}, harness.ctx) as { block?: boolean; reason?: string };
+
+	assert.equal(result.block, true);
+	assert.match(result.reason ?? "", /dynamic Bash arguments require review/);
+	assert.equal(harness.classifierCalls, 1);
+});
+
+test("Bash permission allow routes unquoted pathname expansion to the classifier", async () => {
+	const allow = parseToolPattern("bash(rm -rf *)");
+	assert.ok(allow);
+	const harness = await setupHookTest({
+		config: baseConfig({ permissionAllow: [allow] }),
+		classifier: async () => ({
+			decision: "block",
+			tier: "none",
+			reason: "pathname expansion requires review",
+		}),
+	});
+
+	const result = await harness.emit("tool_call", {
+		toolName: "bash",
+		input: { command: "rm -rf *" },
+	}, harness.ctx) as { block?: boolean; reason?: string } | undefined;
+
+	assert.equal(result?.block, true);
+	assert.match(result?.reason ?? "", /pathname expansion requires review/);
+	assert.equal(harness.classifierCalls, 1);
+});
+
+test("Bash permission allow preserves quoted and escaped glob literals", async () => {
+	const allow = parseToolPattern("bash(echo *)");
+	assert.ok(allow);
+	const harness = await setupHookTest({
+		config: baseConfig({ permissionAllow: [allow] }),
+		classifier: async () => ({
+			decision: "block",
+			tier: "none",
+			reason: "unexpected classifier call",
+		}),
+	});
+
+	for (const command of [
+		'echo "*"',
+		"echo '*'",
+		"echo \\*",
+		"echo $'can\\'t *'",
+	]) {
+		const result = await harness.emit("tool_call", {
+			toolName: "bash",
+			input: { command },
+		}, harness.ctx);
+		assert.equal(result, undefined, command);
+	}
+	assert.equal(harness.classifierCalls, 0);
 });
 
 test("the tool hook analyzes each Bash input once", async () => {

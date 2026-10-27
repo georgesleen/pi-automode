@@ -28,7 +28,9 @@ import {
   PI_PROJECT_LOCAL_SETTINGS,
   PI_PROJECT_SHARED_SETTINGS,
 } from "./constants.ts";
+import { parseModelSpec } from "./model.ts";
 import {
+  isMalformedToolPattern,
   MAX_WILDCARD_PATTERN_LENGTH,
   parseToolPattern,
 } from "./permissions.ts";
@@ -309,7 +311,7 @@ export function validateSettingsFile(
       }
       if (
         hasOwn(autoMode, "classifierModel") &&
-        typeof autoMode.classifierModel !== "string"
+        !isValidClassifierModel(autoMode.classifierModel)
       ) {
         diagnostics.push(
           `${source}: autoMode.classifierModel must be a provider/model string`,
@@ -443,13 +445,18 @@ export function validateSettingsFile(
           continue;
         }
         for (const [index, entry] of value.entries()) {
-          if (typeof entry !== "string" || !parseToolPattern(entry)) {
+          const pattern = parseToolPattern(entry);
+          if (typeof entry !== "string" || !pattern) {
             diagnostics.push(
               `${source}: permissions.${key}[${index}] must be a tool pattern string`,
             );
           } else if (entry.length > MAX_WILDCARD_PATTERN_LENGTH) {
             diagnostics.push(
               `${source}: permissions.${key}[${index}] must be at most ${MAX_WILDCARD_PATTERN_LENGTH} characters`,
+            );
+          } else if (key === "deny" && isMalformedToolPattern(pattern)) {
+            diagnostics.push(
+              `${source}: permissions.${key}[${index}] must be a tool pattern string`,
             );
           }
         }
@@ -616,6 +623,10 @@ export function isClassifierReasoningLevel(
     CLASSIFIER_REASONING_LEVELS.has(value as ClassifierReasoningLevel);
 }
 
+function isValidClassifierModel(value: unknown): value is string {
+  return typeof value === "string" && parseModelSpec(value) !== undefined;
+}
+
 function validTranscriptBudget(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) >= 32;
 }
@@ -652,7 +663,9 @@ function applyAutoModeScalars(
   return {
     ...base,
     enabled: typeof settings.enabled === "boolean" ? settings.enabled : base.enabled,
-    classifierModel: settings.classifierModel ?? base.classifierModel,
+    classifierModel: isValidClassifierModel(settings.classifierModel)
+      ? settings.classifierModel
+      : base.classifierModel,
     classifierModelByProvider: {
       ...base.classifierModelByProvider,
       ...validClassifierModelsByProvider(settings.classifierModelByProvider),

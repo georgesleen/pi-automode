@@ -21,7 +21,7 @@ export function statusLine(
   const classifier = state.classifierAllowed > 0 || state.classifierDenied > 0
     ? ` ca:${state.classifierAllowed} cd:${state.classifierDenied}`
     : "";
-  return `AM${circle} a:${allowed} d:${state.blockedActions}${classifier}`;
+  return `AM ${circle} a:${allowed} d:${state.blockedActions}${classifier}`;
 }
 
 export function statusText(

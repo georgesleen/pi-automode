@@ -74,6 +74,16 @@ export function parseToolPattern(value: unknown): ToolPattern | undefined {
   return pattern;
 }
 
+/** Return whether a parsed permission entry is malformed. */
+export function isMalformedToolPattern(pattern: ToolPattern): boolean {
+  if (!pattern.toolName) return true;
+  if (pattern.argumentPattern === undefined) return false;
+  if (pattern.argumentPattern.trim() === "") return true;
+  return pattern.toolName === "bash" &&
+    (bashPatternAnalyses.get(pattern)?.errors.length ??
+        analyzeBash(pattern.argumentPattern).errors.length) > 0;
+}
+
 function literalPrefixTable(value: string): number[] {
   const table = new Array<number>(value.length).fill(0);
   let prefixLength = 0;
@@ -491,6 +501,93 @@ function redirectListsMatch(
   });
 }
 
+function containsUnquotedBracketExpression(text: string, start: number): boolean {
+  let index = start + 1;
+  if (text[index] === "!" || text[index] === "^") index += 1;
+  let hasMember = false;
+  if (text[index] === "]") {
+    hasMember = true;
+    index += 1;
+  }
+  let quote: "'" | '"' | "$'" | undefined;
+  for (; index < text.length; index += 1) {
+    const character = text[index];
+    if (quote) {
+      if (quote === "$'") {
+        if (character === "\\") {
+          if (index + 1 < text.length) {
+            hasMember = true;
+            index += 1;
+          }
+        } else if (character === "'") quote = undefined;
+        else hasMember = true;
+      } else {
+        if (character === quote) quote = undefined;
+        else if (quote === '"' && character === "\\") index += 1;
+        else hasMember = true;
+      }
+      continue;
+    }
+    if (character === "\\") {
+      if (index + 1 < text.length) {
+        hasMember = true;
+        index += 1;
+      }
+      continue;
+    }
+    if (character === "$" && text[index + 1] === "'") {
+      quote = "$'";
+      index += 1;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "]") return hasMember;
+    hasMember = true;
+  }
+  return false;
+}
+
+function hasUnquotedPathnameExpansion(text: string): boolean {
+  let quote: "'" | '"' | "$'" | undefined;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (quote) {
+      if (quote === "$'") {
+        if (character === "\\") index += 1;
+        else if (character === "'") quote = undefined;
+      } else {
+        if (character === quote) quote = undefined;
+        else if (quote === '"' && character === "\\") index += 1;
+      }
+      continue;
+    }
+    if (character === "\\") {
+      index += 1;
+      continue;
+    }
+    if (character === "$" && text[index + 1] === "'") {
+      quote = "$'";
+      index += 1;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "*" || character === "?") return true;
+    if (
+      character === "[" &&
+      containsUnquotedBracketExpression(text, index)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function commandMatchesAllowPattern(
   patternCommand: BashCommandAnalysis,
   inputCommand: BashCommandAnalysis,
@@ -560,7 +657,10 @@ export function matchesAllowedToolPatterns(
   }
   if (
     bashAnalysis.commands.some((command) =>
-      command.dynamicName || command.dynamicShellScript
+      command.dynamic ||
+      command.dynamicName ||
+      command.dynamicShellScript ||
+      command.argTexts.some(hasUnquotedPathnameExpansion)
     )
   ) {
     return false;

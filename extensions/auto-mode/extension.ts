@@ -338,6 +338,10 @@ export function createPiAutomode(options: PiAutomodeOptions = {}) {
       };
     }
 
+    function blockedToolReason(reason: string): string {
+      return `[pi-automode] Action blocked; the tool did not run. ${reason} Do not claim success, rely on effects from this call, or attempt an equivalent workaround. Report the block to the user before continuing with dependent work. Independent work can continue.`;
+    }
+
     function block(
       ctx: ExtensionContext,
       denial: DenialRecord,
@@ -371,7 +375,10 @@ export function createPiAutomode(options: PiAutomodeOptions = {}) {
           "warning",
         );
       }
-      return { block: true, reason: `[pi-automode] ${denial.reason}` };
+      return {
+        block: true,
+        reason: blockedToolReason(denial.reason),
+      };
     }
 
     function allow(
@@ -447,11 +454,38 @@ export function createPiAutomode(options: PiAutomodeOptions = {}) {
       // 7. classifier for every remaining action, fail-closed on setup/parse errors.
       const cfg = effectiveConfig();
       if (!cfg.enabled) return undefined;
-      if (ctx.signal?.aborted) return { block: true, reason: "Cancelled" };
+
+      const input = event.input as Record<string, unknown>;
+      const summary = actionSummary(event.toolName, input);
+      const logCtx: LogCtx = {
+        logger: createLogger({
+          enabled: cfg.log.enabled,
+          classifierIo: cfg.log.classifierIo,
+          sessionFile: ctx.sessionManager.getSessionFile?.(),
+          sessionDir: ctx.sessionManager.getSessionDir?.() ?? "",
+          sessionCwd: ctx.cwd,
+          sessionId: ctx.sessionManager.getSessionId?.() ?? "unknown",
+          logRoot: options.logRoot,
+          now: now(),
+        }),
+        decisionId: newDecisionId(),
+        classifierModel: classifierModelForProvider(cfg, ctx.model?.provider),
+        reasoning: classifierReasoningForConfig(cfg.classifierReasoningLevel),
+      };
+
+      if (ctx.signal?.aborted) {
+        state.checkedActions += 1;
+        return block(ctx, {
+          timestamp: Date.now(),
+          toolName: event.toolName,
+          reason: "Cancelled",
+          action: summary,
+          kind: "setup",
+        }, logCtx);
+      }
 
       const isOwnedInspection = event.toolName === INSPECT_TOOL &&
         ownsInspectionTool();
-      const input = event.input as Record<string, unknown>;
       let bashAnalysis: BashAnalysis | undefined;
       if (event.toolName === "bash") {
         const source = typeof input.command === "string" ? input.command : "";
@@ -473,23 +507,8 @@ export function createPiAutomode(options: PiAutomodeOptions = {}) {
           };
         }
       }
-      const summary = actionSummary(event.toolName, input);
       if (!isOwnedInspection) state.checkedActions += 1;
-      const logCtx: LogCtx = {
-        logger: createLogger({
-          enabled: cfg.log.enabled,
-          classifierIo: cfg.log.classifierIo,
-          sessionFile: ctx.sessionManager.getSessionFile?.(),
-          sessionDir: ctx.sessionManager.getSessionDir?.() ?? "",
-          sessionCwd: ctx.cwd,
-          sessionId: ctx.sessionManager.getSessionId?.() ?? "unknown",
-          logRoot: options.logRoot,
-          now: now(),
-        }),
-        decisionId: newDecisionId(),
-        classifierModel: classifierModelForProvider(cfg, ctx.model?.provider),
-        reasoning: classifierReasoningForConfig(cfg.classifierReasoningLevel),
-      };
+
 
       for (const pattern of cfg.permissionDeny) {
         if (

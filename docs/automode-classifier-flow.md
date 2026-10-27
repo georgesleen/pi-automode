@@ -67,8 +67,8 @@ flowchart TD
   N --> O{Exact safe token?}
   O -- yes --> Q[Allow tool]
   O -- malformed or error --> O1[Block: fail closed]
-  O -- review --> P[Run structured review]
-  P --> P1{Valid allow decision?}
+  O -- review --> P[Request classifier_decision tool call]
+  P --> P1{Valid allow decision tool call?}
   P1 -- yes --> Q
   P1 -- no or error --> R[Block with classifier reason]
 
@@ -260,23 +260,21 @@ The prompt defines the policy semantics:
 - the classifier cannot invent deny rules or treat the allow-exception list as exhaustive
 - the classifier allows actions that match no hard-deny or soft-deny rule
 
-The fast stage must return exactly `0` for clearly allowed or `1` for review. A `1` response triggers the detailed stage, whose required JSON shape is:
+The fast stage must return exactly `0` for clearly allowed or `1` for review. A `1` response triggers the detailed stage.
 
-```json
-{"decision":"allow","tier":"allow","reason":"brief concrete reason"}
-```
+The detailed request provides one internal `classifier_decision` tool. This tool exists only in the nested classifier context.
 
-or:
+Pi-automode does not register the tool with `pi.registerTool()`, and it has no execution handler. Thus, the main agent cannot call it.
 
-```json
-{"decision":"block","tier":"soft_deny","reason":"brief concrete reason"}
-```
+The tool has these arguments:
 
-Valid `tier` values are:
+- `decision`: `allow` or `block`
+- `tier`: `hard_deny`, `soft_deny`, `allow`, `explicit_intent`, or `none`
+- `reason`: a non-empty string
 
-```text
-hard_deny, soft_deny, allow, explicit_intent, none
-```
+The schema requires all three fields and permits no additional fields. Pi AI requests JSON Schema constrained sampling with `strict: "prefer"`.
+
+A provider that supports strict tool sampling enforces the schema during generation. Other providers can return a normal tool call, which pi-automode validates locally.
 
 An `allow` decision can use `allow`, `explicit_intent`, or `none`. A `block` decision can use `hard_deny`, `soft_deny`, or `none`.
 
@@ -303,9 +301,13 @@ separate from the transcript. Pi-automode does not truncate it:
 {"toolName":"bash","input":{"command":"npm test"}}
 ```
 
-Both classifier stages receive the same context message and exact action
-message. If the exact action cannot fit in the classifier model's context
-window, auto mode blocks the call instead of removing action content.
+The fast and detailed stages receive the same context message and complete action message. Pi-automode checks each request before it sends the request. The estimate includes the system prompt, user-message text, and the stage instruction. For the detailed stage, the estimate also includes the serialized tool schema.
+
+The estimate matches Pi 0.86. It uses `Math.ceil(text.length / 4)`, where `text.length` counts UTF-16 code units. Pi-automode also reserves the stage output limit and the configured reasoning budget. It keeps Pi's 4,096-token context margin.
+
+Pi-automode checks the fast request before the fast-stage call. A fast result of `0` allows the action. Pi-automode does not check the unused detailed request. After a fast result of `1`, pi-automode checks the detailed request. This request includes the `classifier_decision` schema and the larger detailed output reserve.
+
+If a stage request cannot fit in the classifier model's context window, auto mode blocks the call. It does not truncate the action.
 
 Pi-automode builds the transcript from active Pi context entries. It includes only:
 
@@ -343,7 +345,9 @@ The extension asks Pi's model registry for API credentials. If the model cannot 
 No classifier model/API key available; auto mode fails closed.
 ```
 
-Classifier calls use `ctx.signal`, a stable classifier-specific session ID, and `cacheRetention: "short"`. They do not set a temperature because some providers reject it. The calls use provider defaults instead. Providers without cache affinity ignore that option.
+Classifier calls use `ctx.signal`, a stable classifier-specific session ID, and `cacheRetention: "short"`. Codex requests use `cacheRetention: "none"` so classifier WebSockets do not outlive the request. They do not set a temperature because some providers reject it. The calls use provider defaults instead. Providers without cache affinity ignore that option.
+
+The detailed request does not use provider-specific forced tool selection. Its instruction requires exactly one `classifier_decision` call. Missing or invalid calls fail closed.
 
 `autoMode.classifierTimeoutMs` limits each fast-stage and detailed-stage request. The default is 20000 ms.
 
@@ -351,7 +355,7 @@ If a request exceeds its budget, pi-automode aborts it and blocks the action. A 
 
 The fast stage requires one visible digit and uses `maxTokens: 512`. Reasoning models can use hidden tokens before they emit the digit.
 
-Extra visible content fails parsing. Detailed review uses `maxTokens: 1200`. It can retry once after malformed or truncated output.
+Extra visible content fails fast-stage parsing. Detailed review uses `maxTokens: 1200`. It can retry once after a missing, invalid, or truncated decision tool call.
 
 ## Parsing the classifier result
 
@@ -359,19 +363,37 @@ The fast-stage parser requires `stopReason: "stop"`. It removes surrounding whit
 
 Empty responses, additional content, malformed output, and non-stop responses block immediately. Observability logs preserve the untrimmed model response.
 
-The detailed parser accepts only the requested JSON object from a response with `stopReason: "stop"`. It requires `decision`, `tier`, and `reason`.
+The detailed parser requires `stopReason: "toolUse"` and exactly one `classifier_decision` call. The response must not contain non-empty visible text.
 
-The parser rejects wrappers, extra fields, unknown tiers, and empty reasons. If the response shape changes, it fails closed.
+The arguments must contain exactly `decision`, `tier`, and `reason`. Each value must have the required type and an allowed enum value.
 
-A response with `stopReason: "length"` can cause one retry. The truncated response cannot authorize an action. Other non-stop responses block immediately.
+The parser also checks the decision and tier combination. It rejects extra fields, unknown tiers, contradictory combinations, and empty reasons.
+
+A response with `stopReason: "length"` can cause one retry. A missing or invalid decision tool call also can cause one retry.
+
+A truncated or invalid response cannot authorize an action. Error and aborted responses block immediately.
 
 If detailed parsing fails after its retry, pi-automode blocks the action with this reason:
 
 ```text
-Classifier response was not valid decision JSON; auto mode fails closed.
+Classifier response did not contain a valid classifier decision tool call; auto mode fails closed.
 ```
 
-If the model call throws or returns an error or aborted response, pi-automode blocks the action immediately. It uses a classifier failure message.
+Missing or unauthenticated configured models fall back to the session model. When a request throws or returns a provider error, the configured classifier can retry once, then fall back to the session model. Another attempt starts only within 15 seconds of the first attempt and before cancellation. Policy blocks, invalid responses and context-budget failures do not trigger model fallback. If no classifier succeeds, the action remains blocked.
+
+## Agent behavior after a blocked tool call
+
+Pi converts a blocked hook response into an error result and does not run the tool. Pi-automode does not set `terminate: true`, so Pi can request the next model response.
+
+The result states that the tool did not run and preserves the denial reason. The result and the Auto Mode guidance instruct the agent to:
+
+- report the block to the user before work that depends on the blocked action continues
+- not claim success or rely on effects from the blocked action
+- not try an equivalent workaround
+
+Independent work can continue. Interactive approval stays limited to configured `permissions.ask` rules. Classifier and deterministic denials stay final.
+
+These instructions decrease ambiguity in the model context. They do not guarantee that each model will follow the instructions.
 
 ## State, UI, and denial history
 

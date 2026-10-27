@@ -197,6 +197,8 @@ For other allow matching, an input can contain at most 1,048,576 UTF-16 code uni
 
 `write` and `edit` calls whose resolved target is a protected path are never covered by `permissions.allow`. This includes protected targets reached through symlink aliases.
 
+See [Permission recipes](permission-recipes.md) for narrow examples of Bash permissions, directory changes, command chains, redirects, and classifier guidance.
+
 ## Custom models (like OpenRouter's presets)
 
 Pi-automode can only select models that Pi exposes through its model registry. Add unlisted models to `~/.pi/agent/models.json`.

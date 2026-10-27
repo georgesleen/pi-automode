@@ -82,7 +82,7 @@ The bundled `automode-diagnostics` skill uses this tool to diagnose unexpected d
 When the Pi TUI is available, the extension renders a persistent status line:
 
 ```text
-AM● a:12 d:2 ca:5 cd:1
+AM ● a:12 d:2 ca:5 cd:1
 ```
 
 - `AM` — auto-mode prefix. `●` means enabled. `○` means disabled through configuration or `/automode off`.
@@ -93,6 +93,7 @@ AM● a:12 d:2 ca:5 cd:1
 ## Docs
 
 - [Configuration](docs/configuration.md)
+- [Permission recipes](docs/permission-recipes.md)
 - [Defaults and rule-list behavior](docs/defaults.md)
 - [Auto-mode classifier flow](docs/automode-classifier-flow.md)
 - [Observability logging](docs/observability-logging.md)
@@ -125,37 +126,21 @@ The list does not govern `bash`. The classifier and deterministic hard-deny chec
 
 The value `allowInsideWorkingDirectory: true` allows file access inside the working directory locally. Pi-automode sends all outside file access to the classifier, including reads. OMP's hashline `edit` names its targets in `[PATH#TAG]` section headers and `MV` renames rather than a `path` argument; every target is checked, and one call uses the local tier only when all of them are inside the working directory and unprotected.
 
-Classification starts with a conservative one-token filter. If the filter requests review, pi-automode runs structured review.
+Classification starts with a conservative one-token filter. If the filter requests review, pi-automode requests one internal `classifier_decision` tool call.
+
+The tool exists only in the nested classifier request. It is not registered with `pi.registerTool()`, and the main agent cannot call it.
+
+Pi AI requests schema-constrained sampling with `strict: "prefer"`. Supported providers enforce the schema during generation. Pi-automode validates every returned tool call locally.
 
 Both stages receive the complete current tool input in a dedicated message. Transcript truncation cannot remove action content. If the exact input cannot fit in the classifier context, auto mode blocks the call.
 
-Both stages use a classifier-specific session key. They request short cache retention from providers that support it. A missing model, provider failure, or malformed response blocks the action.
-
+Both stages use a classifier-specific session key. They request short cache retention except for Codex, which retains no classifier WebSocket or prompt cache. Missing or unauthenticated configured models fall back to the session model. Quick provider failures can retry and fall back; unavailable classifiers, invalid responses and policy blocks never authorize an action.
 Pi-automode parses Bash structure with `unbash` before permission and deterministic hard-deny checks. The analysis includes nested commands and literal shell-wrapper scripts. A Bash parse error blocks the action.
 
 ## Examples
 
 - `examples/automode.local.json`: copy to `.pi/automode.local.json` in a project and edit the domains, buckets, and source-control org.
-
-### Pro tip
-
-The default rule set might cause denials like this:
-
-> Auto mode blocked subagent: Delegated workers would modify pre-existing files outside the user's bounded authorization, including migrations, CLI code, and approval documentation.
-
-This is to be expected as the included classifier rules are very conservative and err on the side of caution! To explicitly give your robot more leeway, adjust your global `autoMode.allow` entry (or its project-level counterparts). For example, my personal `~/.pi/agent/extensions/pi-automode/config.json` file looks like this:
-
-```json
-{
-  "autoMode": {
-    "allow": [
-      "$defaults",
-      "Creating, modifying, and deleting local files within the Git repository or worktree. This includes pre-existing source code, migrations, CLI code, tests, and project documentation. This permission applies only to local implementation work and excludes files outside the assigned repository/worktree, external systems, credentials, safety controls, and Git history changes."
-    ],
-    …
-  }
-}
-```
+- [Permission recipes](docs/permission-recipes.md): use narrow examples for common permission and classifier-policy changes.
 
 ## Known limits
 
@@ -179,12 +164,12 @@ The tests cover these safety-sensitive areas:
 - classifier routing for `write` and `edit`
 - symlink-aware safety-control checks
 - token-budgeted transcript selection
-- staged classifier parsing and cache behavior
+- staged classifier tool-call parsing and cache behavior
 - hook-level allow and block behavior
 
 ## Publishing
 
-When a maintainer publishes a GitHub Release, GitHub Actions publishes the package to npm. The release tag must match `package.json` exactly. The forms `v1.0.0` and `1.0.0` both match version `1.0.0`.
+When a maintainer publishes a GitHub Release, GitHub Actions publishes the package to npm. The required release tag format is `v<version>`. The `<version>` value must be the same as the version in `package.json`. For example, version `1.0.0` requires tag `v1.0.0`.
 
 The workflow uses npm Trusted Publishing, so it does not need an npm token secret. Configure this package on npm with this repository and workflow file (`.github/workflows/publish.yml`). The workflow builds the package, runs `npm run check`, and publishes with npm provenance.
 
